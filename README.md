@@ -55,5 +55,5 @@ I kept the project maintainable by separating responsibilities (sensor reads, LE
 
 ## Repository Contents
 - `Thermostat.py` (main implementation)
-- `State Machine.drawio.pdf` (state-machine diagram)
+- `StateMachine.drawio.pdf` (state-machine diagram)
 - `Thermostat Lab.docx` (project write-up)
