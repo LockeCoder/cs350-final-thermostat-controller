@@ -20,7 +20,7 @@ The controller uses:
 
 ## Demo Video
 
-[Demo video](https://youtu.be/uvZeKR94jVU)
+[Demo video](https://www.youtube.com/watch?v=9B7xl2bdMHM)
 
 ## System Design: State Machine
 
