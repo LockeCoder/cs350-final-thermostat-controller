@@ -108,7 +108,7 @@ Transitions are controlled by the mode button. The state-machine design is docum
 
 This artifact demonstrates the construction of an embedded-style control system on a Raspberry Pi that integrates multiple hardware components: LCD output, button input, LED status indicators, and I2C sensor communication.
 
-The problem being solved is creating a reliable, testable thermostat-style application that reads real-world data, presents it clearly to the user, and responds to user input with predictable state-driven behavior while also producing periodic telemetry.
+The problem being solved is to create a reliable, testable thermostat-style application that reads real-world data, presents it clearly to the user, and responds to user input with predictable state-driven behavior while also producing periodic telemetry.
 
 ### What Did You Do Particularly Well?
 
