@@ -2,59 +2,68 @@
 """
 Thermostat.py
 
-CS 350 Final Project 
+CS-350 Final Project
 
-Hardware (BCM numbering):
-  AHT20 temp/humidity sensor on I2C bus 1 (SCL=GPIO3, SDA=GPIO2)
-  Red LED       -> GPIO 18
-  Blue LED      -> GPIO 23
-  Mode button   -> GPIO 24  (OFF -> HEAT -> COOL -> OFF)
-  Temp Up       -> GPIO 12  (setpoint +1 F)
-  Temp Down     -> GPIO 25  (setpoint -1 F)
+This script implements a Raspberry Pi-based thermostat controller that reads
+temperature data from an AHT20 sensor, displays system status on a 16x2 LCD,
+uses physical buttons for user input, drives heating/cooling LEDs with PWM, and
+sends periodic UART telemetry.
 
-  16x2 LCD (character):
-    RS -> GPIO 17
-    EN -> GPIO 27
-    D4 -> GPIO 5
-    D5 -> GPIO 6
-    D6 -> GPIO 13
-    D7 -> GPIO 26
+Hardware uses BCM numbering:
+    AHT20 temp/humidity sensor: I2C bus 1 (SCL=GPIO3, SDA=GPIO2)
 
-Software requirements implemented:
-  1. Default setpoint = 72 F.
-  2. Read temperature from AHT20 via I2C.
-  3. Use LEDs to indicate heat/cool (fade if actively heating/cooling, solid if satisfied).
-  4. Buttons:
-       - Button 1 (GPIO 24): toggle OFF / HEAT / COOL.
-       - Button 2 (GPIO 12): increase setpoint by 1 F.
-       - Button 3 (GPIO 25): decrease setpoint by 1 F.
-  5. LCD:
-       - Line 1: date and current time.
-       - Line 2: alternates between current temperature and mode+setpoint.
-  6. UART:
-       - Send comma-delimited string every 30 seconds:
-           state, current temperature, setpoint.
+    Red LED:      GPIO 18
+    Blue LED:     GPIO 23
+    Mode button:  GPIO 24  (OFF -> HEAT -> COOL -> OFF)
+    Temp Up:      GPIO 12  (set point +1 F)
+    Temp Down:    GPIO 25  (set point -1 F)
+
+    16x2 LCD:
+        RS -> GPIO 17
+        EN -> GPIO 27
+        D4 -> GPIO 5
+        D5 -> GPIO 6
+        D6 -> GPIO 13
+        D7 -> GPIO 26
+
+Implemented requirements:
+    1. Default set point is 72 F.
+    2. Read temperature from the AHT20 sensor over I2C.
+    3. Use LEDs to indicate heat/cool status:
+        - Fade while actively heating/cooling.
+        - Remain solid when the selected mode is satisfied.
+    4. Use three buttons:
+        - Button 1: toggle OFF / HEAT / COOL.
+        - Button 2: increase set point by 1 F.
+        - Button 3: decrease set point by 1 F.
+    5. LCD output:
+        - Line 1: date and current time.
+        - Line 2: alternates between current temperature and mode/set point.
+    6. UART output:
+        - Send comma-delimited telemetry every 30 seconds:
+          state, current temperature, set point.
 """
 
-import time
-import math
-from datetime import datetime
+from __future__ import annotations
 
+import math
+import time
+from contextlib import suppress
+from datetime import datetime
+from typing import Any
+
+import adafruit_ahtx0
+import adafruit_character_lcd.character_lcd as character_lcd
 import board
 import busio
-import adafruit_ahtx0
-
 import digitalio
-import adafruit_character_lcd.character_lcd as character_lcd
-
-import serial
-
 import RPi.GPIO as GPIO
+import serial
 from gpiozero import Button
 
 
 # -----------------------------
-# Constants and global state
+# Constants
 # -----------------------------
 
 # LED pins (BCM)
@@ -62,9 +71,9 @@ RED_LED_PIN = 18
 BLUE_LED_PIN = 23
 
 # Button pins (BCM)
-MODE_BUTTON_PIN = 24      # OFF/HEAT/COOL mode button
-TEMP_UP_BUTTON_PIN = 12   # increase setpoint
-TEMP_DOWN_BUTTON_PIN = 25 # decrease setpoint
+MODE_BUTTON_PIN = 24
+TEMP_UP_BUTTON_PIN = 12
+TEMP_DOWN_BUTTON_PIN = 25
 
 # LCD pin mapping (BCM)
 LCD_RS_PIN = 17
@@ -77,38 +86,46 @@ LCD_COLUMNS = 16
 LCD_ROWS = 2
 
 # PWM
-FADE_FREQUENCY_HZ = 100.0  # LED PWM frequency
+FADE_FREQUENCY_HZ = 100.0
 
 # UART
 UART_PORT = "/dev/serial0"
 UART_BAUDRATE = 115200
+UART_INTERVAL_SECONDS = 30.0
+
+# Timing
+LCD_TOGGLE_INTERVAL_SECONDS = 2.0
+MAIN_LOOP_SLEEP_SECONDS = 0.1
 
 # Thermostat modes
 OFF = 0
 HEAT = 1
 COOL = 2
 
-# Default setpoint 
+# Default set point
 DEFAULT_SETPOINT_F = 72.0
 
-# Global variables for state
+
+# -----------------------------
+# Global state
+# -----------------------------
+
 current_mode = OFF
 setpoint_f = DEFAULT_SETPOINT_F
-show_temp_on_lcd = True   # toggles the second line display
+show_temp_on_lcd = True
 
 
 # -----------------------------
-# Initialization Helpers
+# Initialization helpers
 # -----------------------------
 
-def init_i2c_and_sensor():
-    """Initialize I2C bus and AHT20 temperature sensor."""
+def init_i2c_and_sensor() -> Any:
+    """Initialize the I2C bus and AHT20 temperature/humidity sensor."""
     i2c = busio.I2C(board.SCL, board.SDA)
-    sensor = adafruit_ahtx0.AHTx0(i2c)
-    return sensor
+    return adafruit_ahtx0.AHTx0(i2c)
 
 
-def init_lcd():
+def init_lcd() -> character_lcd.Character_LCD_Mono:
     """Initialize the 16x2 character LCD using the Adafruit library."""
     lcd_rs = digitalio.DigitalInOut(getattr(board, f"D{LCD_RS_PIN}"))
     lcd_en = digitalio.DigitalInOut(getattr(board, f"D{LCD_EN_PIN}"))
@@ -127,28 +144,29 @@ def init_lcd():
         LCD_COLUMNS,
         LCD_ROWS,
     )
+
     lcd.clear()
-    # NOTE: backlight is hard-wired to +5V/GND in hardware, so we do NOT
-    # call lcd.backlight = True here (no backlight_pin was provided).
+
+    # The LCD backlight is hard-wired to +5V/GND in this hardware setup.
+    # No backlight_pin was provided, so do not set lcd.backlight here.
     return lcd
 
 
-def init_gpio_and_buttons():
-    """Initialize GPIO, LEDs with PWM, and buttons using gpiozero."""
+def init_gpio_and_buttons() -> tuple[GPIO.PWM, GPIO.PWM, Button, Button, Button]:
+    """Initialize GPIO pins, PWM LEDs, and gpiozero button inputs."""
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
 
-    # LEDs as PWM outputs
     GPIO.setup(RED_LED_PIN, GPIO.OUT)
     GPIO.setup(BLUE_LED_PIN, GPIO.OUT)
 
     red_pwm = GPIO.PWM(RED_LED_PIN, FADE_FREQUENCY_HZ)
     blue_pwm = GPIO.PWM(BLUE_LED_PIN, FADE_FREQUENCY_HZ)
 
-    red_pwm.start(0.0)   # duty cycle 0 = off
+    red_pwm.start(0.0)
     blue_pwm.start(0.0)
 
-    # gpiozero buttons; hardware has external 10k pull-ups to 3.3V (active-low).
+    # Hardware uses external 10k pull-ups to 3.3V, so buttons are active-low.
     mode_button = Button(MODE_BUTTON_PIN, pull_up=True, bounce_time=0.1)
     temp_up_button = Button(TEMP_UP_BUTTON_PIN, pull_up=True, bounce_time=0.1)
     temp_down_button = Button(TEMP_DOWN_BUTTON_PIN, pull_up=True, bounce_time=0.1)
@@ -156,9 +174,9 @@ def init_gpio_and_buttons():
     return red_pwm, blue_pwm, mode_button, temp_up_button, temp_down_button
 
 
-def init_uart():
-    """Initialize UART serial port for output (Requirement 6)."""
-    ser = serial.Serial(
+def init_uart() -> serial.Serial:
+    """Initialize the UART serial port for telemetry output."""
+    return serial.Serial(
         port=UART_PORT,
         baudrate=UART_BAUDRATE,
         bytesize=serial.EIGHTBITS,
@@ -166,18 +184,22 @@ def init_uart():
         stopbits=serial.STOPBITS_ONE,
         timeout=1,
     )
-    return ser
 
 
 # -----------------------------
-# Button Callbacks
+# Button callbacks
 # -----------------------------
 
-def attach_button_callbacks(mode_button, temp_up_button, temp_down_button):
-    """Attach callbacks to buttons using gpiozero."""
+def attach_button_callbacks(
+    mode_button: Button,
+    temp_up_button: Button,
+    temp_down_button: Button,
+) -> None:
+    """Attach input callbacks to the mode, temperature up, and temperature down buttons."""
 
-    def on_mode_pressed():
+    def on_mode_pressed() -> None:
         global current_mode
+
         if current_mode == OFF:
             current_mode = HEAT
         elif current_mode == HEAT:
@@ -185,11 +207,11 @@ def attach_button_callbacks(mode_button, temp_up_button, temp_down_button):
         else:
             current_mode = OFF
 
-    def on_temp_up_pressed():
+    def on_temp_up_pressed() -> None:
         global setpoint_f
         setpoint_f += 1.0
 
-    def on_temp_down_pressed():
+    def on_temp_down_pressed() -> None:
         global setpoint_f
         setpoint_f -= 1.0
 
@@ -199,124 +221,156 @@ def attach_button_callbacks(mode_button, temp_up_button, temp_down_button):
 
 
 # -----------------------------
-# Sensor / Temperature Helpers
+# Sensor and temperature helpers
 # -----------------------------
 
-def read_temperature_f(sensor):
-    """Read the current temperature from the AHT20 in Fahrenheit."""
+def read_temperature_f(sensor: Any) -> float:
+    """Read the current temperature from the AHT20 sensor and convert it to Fahrenheit."""
     temp_c = sensor.temperature
-    temp_f = (temp_c * 9.0 / 5.0) + 32.0
-    return temp_f
+    return (temp_c * 9.0 / 5.0) + 32.0
 
 
 # -----------------------------
-# LED / Heating-Cooling Logic
+# LED and heating/cooling logic
 # -----------------------------
 
-def set_led_duty(red_pwm, blue_pwm, red_level, blue_level):
+def clamp(value: float, minimum: float = 0.0, maximum: float = 100.0) -> float:
+    """Clamp a numeric value to the provided minimum and maximum range."""
+    return max(minimum, min(maximum, value))
+
+
+def set_led_duty(
+    red_pwm: GPIO.PWM,
+    blue_pwm: GPIO.PWM,
+    red_level: float,
+    blue_level: float,
+) -> None:
     """
     Set LED brightness.
-    red_level and blue_level are 0.0..1.0; convert to 0..100 duty cycle.
+
+    red_level and blue_level use a 0.0 to 1.0 range and are converted to
+    0.0 to 100.0 PWM duty cycle values.
     """
-    red_pwm.ChangeDutyCycle(max(0.0, min(100.0, red_level * 100.0)))
-    blue_pwm.ChangeDutyCycle(max(0.0, min(100.0, blue_level * 100.0)))
+    red_pwm.ChangeDutyCycle(clamp(red_level * 100.0))
+    blue_pwm.ChangeDutyCycle(clamp(blue_level * 100.0))
 
 
-def update_leds_for_state(red_pwm, blue_pwm, mode, current_temp_f, setpoint_f, now):
+def update_leds_for_state(
+    red_pwm: GPIO.PWM,
+    blue_pwm: GPIO.PWM,
+    mode: int,
+    current_temp_f: float,
+    active_setpoint_f: float,
+    now: float,
+) -> None:
     """
-    Requirement 3:
-      A. If heating and temp < setpoint: red LED fades in/out.
-      B. If cooling and temp > setpoint: blue LED fades in/out.
-      C. If heating and temp >= setpoint: red solid ON.
-      D. If cooling and temp <= setpoint: blue solid ON.
-      OFF mode: both LEDs OFF.
+    Update heating/cooling LEDs based on thermostat mode and temperature.
+
+    HEAT:
+        - temp < set point: red LED fades.
+        - temp >= set point: red LED remains solid.
+
+    COOL:
+        - temp > set point: blue LED fades.
+        - temp <= set point: blue LED remains solid.
+
+    OFF:
+        - both LEDs remain off.
     """
     red_level = 0.0
     blue_level = 0.0
 
     if mode == HEAT:
-        if current_temp_f < setpoint_f:
-            # Fade red LED in and out 
+        if current_temp_f < active_setpoint_f:
             phase = (now % 2.0) / 2.0
             red_level = 0.5 + 0.5 * math.sin(2.0 * math.pi * phase)
         else:
-            # Solid red
             red_level = 1.0
+
     elif mode == COOL:
-        if current_temp_f > setpoint_f:
-            # Fade blue LED
+        if current_temp_f > active_setpoint_f:
             phase = (now % 2.0) / 2.0
             blue_level = 0.5 + 0.5 * math.sin(2.0 * math.pi * phase)
         else:
-            # Solid blue
             blue_level = 1.0
-    else:
-        # OFF mode – both LEDs off
-        red_level = 0.0
-        blue_level = 0.0
 
     set_led_duty(red_pwm, blue_pwm, red_level, blue_level)
 
 
 # -----------------------------
-# LCD Helpers
+# LCD helpers
 # -----------------------------
 
-def mode_to_string(mode):
+def mode_to_string(mode: int) -> str:
+    """Convert the thermostat mode constant to a display string."""
     if mode == OFF:
         return "OFF"
-    elif mode == HEAT:
+
+    if mode == HEAT:
         return "HEAT"
-    else:
-        return "COOL"
+
+    return "COOL"
 
 
-def update_lcd(lcd, current_temp_f, mode, setpoint_f, show_temp_line):
+def format_lcd_line(value: str) -> str:
+    """Limit and pad LCD text to exactly 16 characters."""
+    return value[:LCD_COLUMNS].ljust(LCD_COLUMNS)
+
+
+def update_lcd(
+    lcd: character_lcd.Character_LCD_Mono,
+    current_temp_f: float,
+    mode: int,
+    active_setpoint_f: float,
+    show_temp_line: bool,
+) -> None:
     """
-    Requirement 5:
-      - First line: date + current time.
-      - Second line: alternates between current temp and mode+setpoint.
+    Update LCD output.
+
+    Line 1: date and current time.
+    Line 2: alternates between current temperature and mode/set point.
     """
     now = datetime.now()
-    # Example: "02/20 19:42:33"
     line1 = now.strftime("%m/%d %H:%M:%S")
 
     if show_temp_line:
         line2 = f"Temp: {current_temp_f:5.1f}F"
     else:
-        state_str = mode_to_string(mode)
-        line2 = f"{state_str} SP:{setpoint_f:4.1f}"
-
-    # lines are at most 16 chars
-    line1 = line1[:16]
-    line2 = line2[:16]
+        line2 = f"{mode_to_string(mode)} SP:{active_setpoint_f:4.1f}"
 
     lcd.home()
-    lcd.message = line1 + "\n" + line2
+    lcd.message = f"{format_lcd_line(line1)}\n{format_lcd_line(line2)}"
 
 
 # -----------------------------
-# UART Helper
+# UART helper
 # -----------------------------
 
-def send_uart_status(ser, current_temp_f, mode, setpoint_f):
+def send_uart_status(
+    ser: serial.Serial,
+    current_temp_f: float,
+    mode: int,
+    active_setpoint_f: float,
+) -> None:
     """
-    Requirement 6:
-      - Single comma-delimited string every 30 seconds.
-      - Fields: state, current temperature, setpoint.
+    Send one comma-delimited telemetry record over UART.
+
+    Format:
+        state,current_temperature,setpoint
     Example:
-      "HEAT,70.50,72.00\n"
+        HEAT,70.50,72.00
     """
     state_str = mode_to_string(mode)
-    msg = f"{state_str},{current_temp_f:.2f},{setpoint_f:.2f}\n"
+    msg = f"{state_str},{current_temp_f:.2f},{active_setpoint_f:.2f}\n"
     ser.write(msg.encode("utf-8"))
 
 
 # -----------------------------
-# Main
+# Main program
 # -----------------------------
 
-def main():
+def main() -> None:
+    """Run the thermostat controller main loop."""
     global current_mode, setpoint_f, show_temp_on_lcd
 
     print("Initializing thermostat system...")
@@ -333,40 +387,46 @@ def main():
     try:
         while True:
             now = time.time()
-
-            # Requirement 2
             current_temp_f = read_temperature_f(sensor)
 
-            # Update LED behavior based on mode & temperature
-            update_leds_for_state(red_pwm, blue_pwm, current_mode, current_temp_f, setpoint_f, now)
+            update_leds_for_state(
+                red_pwm,
+                blue_pwm,
+                current_mode,
+                current_temp_f,
+                setpoint_f,
+                now,
+            )
 
-            # Flip what we show on LCD second line every 2 seconds
-            if now - last_lcd_toggle_time >= 2.0:
+            if now - last_lcd_toggle_time >= LCD_TOGGLE_INTERVAL_SECONDS:
                 show_temp_on_lcd = not show_temp_on_lcd
                 last_lcd_toggle_time = now
 
-            update_lcd(lcd, current_temp_f, current_mode, setpoint_f, show_temp_on_lcd)
+            update_lcd(
+                lcd,
+                current_temp_f,
+                current_mode,
+                setpoint_f,
+                show_temp_on_lcd,
+            )
 
-            # Requirement 6
-            if now - last_uart_time >= 30.0:
+            if now - last_uart_time >= UART_INTERVAL_SECONDS:
                 send_uart_status(ser, current_temp_f, current_mode, setpoint_f)
                 last_uart_time = now
 
-            time.sleep(0.1)
+            time.sleep(MAIN_LOOP_SLEEP_SECONDS)
 
     except KeyboardInterrupt:
         print("\nThermostat stopped by user.")
 
     finally:
-        # Cleanup
         red_pwm.stop()
         blue_pwm.stop()
         GPIO.cleanup()
         lcd.clear()
-        try:
+
+        with suppress(Exception):
             ser.close()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":
