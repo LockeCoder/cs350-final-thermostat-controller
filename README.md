@@ -87,6 +87,41 @@ Transitions are controlled by the mode button. The state-machine design is docum
 6. The red and blue LEDs indicate heating or cooling behavior.
 7. UART output sends periodic comma-delimited telemetry.
 
+## Setup Notes
+
+This project is intended to run on a Raspberry Pi with the required hardware connected to the GPIO pins listed in `Thermostat.py`.
+
+Before running the program, verify:
+
+- I2C is enabled on the Raspberry Pi.
+- The AHT20 sensor is detected on the I2C bus.
+- The LCD is wired to the expected GPIO pins.
+- The mode, temperature up, and temperature down buttons are connected correctly.
+- The red and blue LEDs are connected to the correct GPIO pins.
+- UART serial output is enabled if telemetry output is being tested.
+
+## Python Dependencies
+
+The project uses Raspberry Pi and Adafruit hardware libraries, including:
+
+- `adafruit-circuitpython-ahtx0`
+- `adafruit-circuitpython-charlcd`
+- `gpiozero`
+- `pyserial`
+- `RPi.GPIO`
+
+A future improvement would be adding a dedicated `requirements.txt` file for easier setup.
+
+## Running the Program
+
+On the Raspberry Pi, run:
+
+```bash
+python3 Thermostat.py
+```
+
+The program runs continuously until stopped by the user. Press `Ctrl + C` to stop the program and trigger cleanup logic.
+
 ## Skills Demonstrated
 
 - Python programming for hardware-integrated systems
@@ -150,9 +185,8 @@ This structure makes it easier to extend the project with new states, different 
 
 ## Future Improvements
 
-- Reformat `Thermostat.py` for improved readability
-- Add `requirements.txt`
-- Add setup instructions for Raspberry Pi configuration
+- Add a `requirements.txt` file
 - Add screenshots of the wiring, LCD output, and LED behavior
 - Add a short validation checklist for each thermostat state
+- Add setup instructions with exact Raspberry Pi configuration steps
 - Organize files into `src/`, `docs/`, and `media/` folders
